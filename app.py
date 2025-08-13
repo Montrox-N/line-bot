@@ -3,9 +3,9 @@ from flask import Flask, request, abort, redirect, url_for, render_template_stri
 from dotenv import load_dotenv
 
 # === إعدادات عامة ===
-load_dotenv()  # محليًا فقط، آمن تجاهلها على Render
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "change-me")  # ضعها في Render
-FLASK_SECRET   = os.getenv("FLASK_SECRET",   "please-change")  # ضعها في Render
+load_dotenv()
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "change-me")
+FLASK_SECRET   = os.getenv("FLASK_SECRET",   "please-change")
 WORDS_FILE     = os.getenv("WORDS_FILE", "words.json")
 
 # === LINE SDK ===
@@ -104,4 +104,122 @@ ADMIN_TEMPLATE = """
     <div class="row">
       <div>
         <label>الكلمة/المفتاح:</label>
-        <inp
+        <input type="text" name="key" required>
+      </div>
+      <div>
+        <label>الرد:</label>
+        <input type="text" name="val" required>
+      </div>
+    </div>
+    <button class="btn" style="margin-top:10px">حفظ</button>
+  </form>
+
+  <h3>القائمة الحالية</h3>
+  <table>
+    <thead><tr><th>الكلمة</th><th>الرد</th><th>إجراء</th></tr></thead>
+    <tbody>
+      {% for k, v in words.items() %}
+      <tr>
+        <td>{{ k }}</td>
+        <td>{{ v }}</td>
+        <td>
+          <form method="post" action="{{ url_for('admin_delete') }}" style="display:inline">
+            <input type="hidden" name="key" value="{{ k }}">
+            <button class="btn">حذف</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+      {% if not words %}
+      <tr><td colspan="3" style="text-align:center">لا توجد كلمات بعد</td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+</body>
+</html>
+"""
+
+LOGIN_TEMPLATE = """
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <title>تسجيل الدخول للوحة الإدارة</title>
+  <style>
+    body{font-family:sans-serif; max-width:420px; margin:48px auto}
+    label{display:block; margin-bottom:6px}
+    input{width:100%; padding:8px; margin-bottom:10px; box-sizing:border-box}
+    .btn{padding:8px 12px; border:1px solid #555; background:#f5f5f5; cursor:pointer}
+    .error{color:#b00; margin-top:8px}
+  </style>
+</head>
+<body>
+  <h2 style="text-align:center">تسجيل الدخول للوحة الإدارة</h2>
+  <form method="post">
+    <label>كلمة المرور:</label>
+    <input type="password" name="password" required>
+    <button class="btn">دخول</button>
+  </form>
+  {% if error %}
+  <p class="error">{{ error }}</p>
+  {% endif %}
+</body>
+</html>
+"""
+
+def require_login(fn):
+    from functools import wraps
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if not session.get("admin_ok"):
+            return redirect(url_for("admin_login"))
+        return fn(*args, **kwargs)
+    return wrapper
+
+@app.route("/admin/login", methods=["GET", "POST"])
+def admin_login():
+    if request.method == "POST":
+        if request.form.get("password") == ADMIN_PASSWORD:
+            session["admin_ok"] = True
+            return redirect(url_for("admin_home"))
+        return render_template_string(LOGIN_TEMPLATE, error="كلمة المرور غير صحيحة")
+    return render_template_string(LOGIN_TEMPLATE, error=None)
+
+@app.post("/admin/logout")
+def admin_logout():
+    session.clear()
+    return redirect(url_for("admin_login"))
+
+@app.get("/admin")
+@require_login
+def admin_home():
+    words = load_words()
+    return render_template_string(ADMIN_TEMPLATE, words=words, words_file=WORDS_FILE)
+
+@app.post("/admin/add")
+@require_login
+def admin_add():
+    key = (request.form.get("key") or "").strip()
+    val = (request.form.get("val") or "").strip()
+    if key and val:
+        words = load_words()
+        words[key] = val
+        save_words(words)
+    return redirect(url_for("admin_home"))
+
+@app.post("/admin/delete")
+@require_login
+def admin_delete():
+    key = (request.form.get("key") or "").strip()
+    words = load_words()
+    if key in words:
+        words.pop(key)
+        save_words(words)
+    return redirect(url_for("admin_home"))
+
+@app.get("/")
+def health():
+    return "OK"
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
