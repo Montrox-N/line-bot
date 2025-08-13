@@ -1,55 +1,58 @@
 import os
-from flask import Flask, request, abort
-
+from flask import Flask, request
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
-from linebot.v3.messaging import (
-    Configuration, ApiClient, MessagingApi,
-    ReplyMessageRequest, TextMessage
-)
+from linebot.v3.messaging import Configuration, ApiClient, MessagingApi, ReplyMessageRequest, TextMessage
 from linebot.v3.webhooks import MessageEvent, TextMessageContent, MemberJoinedEvent
 
-# (اختياري) لو عندك helper.py للردود الجاهزة
-try:
-    from helper import get_auto_reply
-except Exception:
-    def get_auto_reply(_): return None
+from helper import get_auto_reply, check_forbidden, get_warning_message
 
 app = Flask(__name__)
 
-# ✅ اقرأ القيم من المتغيرات البيئية (آمن للنشر على Render)
 CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-
 if not CHANNEL_SECRET or not CHANNEL_ACCESS_TOKEN:
-    # لو تشغل محليًا تقدر تطبع رسالة بدل raise
     raise RuntimeError("ضبط المتغيرات البيئية LINE_CHANNEL_SECRET و LINE_CHANNEL_ACCESS_TOKEN مطلوب قبل التشغيل.")
 
 handler = WebhookHandler(CHANNEL_SECRET)
 configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 
+@app.route("/health")
+def health():
+    return "OK", 200
+
 @app.route("/callback", methods=["POST"])
 def callback():
     signature = request.headers.get("X-Line-Signature", "")
     body = request.get_data(as_text=True)
-
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
         return "invalid signature", 400
     except Exception:
         return "error", 400
-
     return "OK", 200
 
 @handler.add(MessageEvent, message=TextMessageContent)
-def handle_text(event: MessageEvent):
-    text = (event.message.text or "").strip()
-    reply = get_auto_reply(text)
+def on_text(event: MessageEvent):
+    txt = (event.message.text or "").strip()
+    src_type = getattr(event.source, "type", None)
+    if src_type in ("group", "room"):
+        if check_forbidden(txt):
+            warn = get_warning_message()
+            with ApiClient(configuration) as client:
+                MessagingApi(client).reply_message_with_http_info(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[TextMessage(text=warn)]
+                    )
+                )
+            return
+    reply = get_auto_reply(txt)
     if not reply:
         return
-    with ApiClient(configuration) as api_client:
-        MessagingApi(api_client).reply_message_with_http_info(
+    with ApiClient(configuration) as client:
+        MessagingApi(client).reply_message_with_http_info(
             ReplyMessageRequest(
                 reply_token=event.reply_token,
                 messages=[TextMessage(text=reply)]
@@ -57,9 +60,9 @@ def handle_text(event: MessageEvent):
         )
 
 @handler.add(MemberJoinedEvent)
-def on_member_joined(event: MemberJoinedEvent):
-    with ApiClient(configuration) as api_client:
-        MessagingApi(api_client).reply_message_with_http_info(
+def on_join(event: MemberJoinedEvent):
+    with ApiClient(configuration) as client:
+        MessagingApi(client).reply_message_with_http_info(
             ReplyMessageRequest(
                 reply_token=event.reply_token,
                 messages=[TextMessage(text="مرحبًا 👋 نورتوا القروب! ✨")]
@@ -67,6 +70,5 @@ def on_member_joined(event: MemberJoinedEvent):
         )
 
 if __name__ == "__main__":
-    # Render يمرّر PORT تلقائيًا
     port = int(os.getenv("PORT", "8000"))
     app.run(host="0.0.0.0", port=port)
