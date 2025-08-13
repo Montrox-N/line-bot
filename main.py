@@ -4,6 +4,7 @@ from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import Configuration, ApiClient, MessagingApi, ReplyMessageRequest, TextMessage
 from linebot.v3.webhooks import MessageEvent, TextMessageContent, MemberJoinedEvent
+# تعديل لاختبار النشر التلقائي
 
 from helper import get_auto_reply, check_forbidden, get_warning_message
 
