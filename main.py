@@ -32,6 +32,26 @@ configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 
 # كلمة مرور لوحة الإدارة (ADMIN_PASSWORD في Environment على Render)
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
+import json
+
+# اسم ملف الكلمات (يمكن تغييره عبر متغير بيئي WORDS_FILE إذا رغبت)
+WORDS_FILE = os.getenv("WORDS_FILE", "words.json")
+
+def load_words():
+    if os.path.exists(WORDS_FILE):
+        try:
+            with open(WORDS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+        except Exception:
+            pass
+    return {}
+
+def save_words(data: dict):
+    # يحفظ مع تنسيق جميل ويدعم العربية
+    with open(WORDS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 # =============================
 # مسارات عامة
@@ -56,34 +76,81 @@ def callback():
 # لوحة الإدارة (جلسات + كلمة مرور)
 # =============================
 ADMIN_TEMPLATE = """
-<!doctype html>
+<!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
   <meta charset="utf-8">
   <title>لوحة تحكم البوت</title>
   <style>
-    body { font-family: sans-serif; max-width: 720px; margin: 24px auto; }
-    .box { border: 1px solid #ddd; border-radius: 12px; padding: 16px; }
-    .row { margin: 12px 0; }
+    body { font-family: sans-serif; max-width: 900px; margin: 24px auto; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #ddd; padding: 8px; }
+    th { background: #f7f7f7; }
+    input[type=text] { width: 100%; padding: 6px; }
+    .box { border: 1px solid #ddd; border-radius: 12px; padding: 16px; margin-bottom: 16px; }
     code { background:#f5f5f5; padding:2px 6px; border-radius:6px; }
-    button { padding: 8px 16px; cursor: pointer; }
+    .muted { color:#666; }
   </style>
 </head>
 <body>
   <h2>لوحة تحكم البوت</h2>
+
   <div class="box">
-    <div class="row">حالة الخدمة: <b>تشغيل ✅</b></div>
-    <div class="row">مسار الصحّة: <code>/health</code></div>
-    <div class="row">الويبهوك: <code>/callback</code></div>
-    <div class="row">الردود من الملف: <code>words.json</code></div>
-    <div class="row">قائمة المنع من: <code>moderation.json</code></div>
+    <div>حالة الخدمة: <b>تشغيل ✅</b></div>
+    <div>مسار الصحّة: <code>/health</code></div>
+    <div>الويبهوك: <code>/callback</code></div>
+    <div class="muted">الردود من الملف: <code>{{ words_file }}</code> — قائمة المنع من: <code>moderation.json</code></div>
   </div>
-  <form method="post" action="{{ url_for('admin_logout') }}" style="margin-top:16px">
+
+  <div class="box">
+    <h3>الردود الحالية</h3>
+    {% if words %}
+    <table>
+      <tr><th>الكلمة</th><th>الرد</th><th style="width:110px">حذف</th></tr>
+      {% for key, value in words.items() %}
+      <tr>
+        <td>{{ key }}</td>
+        <td>{{ value }}</td>
+        <td>
+          <form method="post" action="{{ url_for('admin_delete') }}" style="display:inline">
+            <input type="hidden" name="word" value="{{ key }}">
+            <button type="submit">حذف</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% else %}
+      <div>🚫 لا توجد ردود حالياً.</div>
+    {% endif %}
+  </div>
+
+  <div class="box">
+    <h3>إضافة رد جديد</h3>
+    <form method="post" action="{{ url_for('admin_add') }}">
+      <div style="display:grid; grid-template-columns: 1fr 2fr 140px; gap:10px; align-items:center;">
+        <div>
+          <label>الكلمة/العبارة</label>
+          <input type="text" name="word" required>
+        </div>
+        <div>
+          <label>الرد</label>
+          <input type="text" name="reply" required>
+        </div>
+        <div style="margin-top:22px;">
+          <button type="submit" style="width:100%;">إضافة</button>
+        </div>
+      </div>
+    </form>
+  </div>
+
+  <form method="post" action="{{ url_for('admin_logout') }}">
     <button type="submit">تسجيل الخروج</button>
   </form>
 </body>
 </html>
 """
+
 
 LOGIN_TEMPLATE = """
 <!doctype html>
@@ -116,7 +183,8 @@ LOGIN_TEMPLATE = """
 def admin_home():
     if not session.get("admin_ok"):
         return redirect(url_for("admin_login"))
-    return render_template_string(ADMIN_TEMPLATE)
+    words = load_words()
+    return render_template_string(ADMIN_TEMPLATE, words=words, words_file=WORDS_FILE)
 
 @app.route("/admin/login", methods=["GET", "POST"])
 def admin_login():
@@ -129,6 +197,29 @@ def admin_login():
         session["admin_ok"] = True
         return redirect(url_for("admin_home"))
     return render_template_string(LOGIN_TEMPLATE, error="كلمة المرور غير صحيحة"), 403
+@app.post("/admin/add")
+def admin_add():
+    if not session.get("admin_ok"):
+        return redirect(url_for("admin_login"))
+    word = (request.form.get("word") or "").strip()
+    reply = (request.form.get("reply") or "").strip()
+    if not word or not reply:
+        return redirect(url_for("admin_home"))
+    words = load_words()
+    words[word] = reply
+    save_words(words)
+    return redirect(url_for("admin_home"))
+
+@app.post("/admin/delete")
+def admin_delete():
+    if not session.get("admin_ok"):
+        return redirect(url_for("admin_login"))
+    word = (request.form.get("word") or "").strip()
+    words = load_words()
+    if word in words:
+        del words[word]
+        save_words(words)
+    return redirect(url_for("admin_home"))
 
 @app.post("/admin/logout")
 def admin_logout():
