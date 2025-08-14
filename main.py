@@ -1,5 +1,12 @@
 import os
-from flask import Flask, request, render_template_string, redirect, url_for, session, abort
+import json
+import shutil
+from pathlib import Path
+
+from flask import (
+    Flask, request, render_template_string,
+    redirect, url_for, session, abort, send_file
+)
 
 # LINE SDK v3
 from linebot.v3 import WebhookHandler
@@ -12,14 +19,13 @@ from linebot.v3.webhooks import (
     MessageEvent, TextMessageContent, MemberJoinedEvent
 )
 
-# الهلبر: ردود + منع كلمات القروب (تأكد وجود helper.py بنفس الدوال)
+# الهلبر: الردود + المنع (تأكد من وجود helper.py بنفس الدوال)
 from helper import get_auto_reply, check_forbidden, get_warning_message
 
 # =============================
-# تهيئة Flask + المفاتيح
+# تهيئة Flask + مفاتيح البيئة
 # =============================
 app = Flask(__name__)
-# مفتاح الجلسة للّوحة (ضَع FLASK_SECRET_KEY في Environment على Render)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "please-change-this")
 
 CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
@@ -30,28 +36,47 @@ if not CHANNEL_SECRET or not CHANNEL_ACCESS_TOKEN:
 handler = WebhookHandler(CHANNEL_SECRET)
 configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 
-# كلمة مرور لوحة الإدارة (ADMIN_PASSWORD في Environment على Render)
+# كلمة مرور لوحة الإدارة
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
-import json
 
-# اسم ملف الكلمات (يمكن تغييره عبر متغير بيئي WORDS_FILE إذا رغبت)
+# =============================
+# إعداد ملف الكلمات (يدعم قرص دائم)
+# =============================
+# إذا فعّلت Persistent Disk في Render:
+#   Settings → Disks → Add Disk (mount path=/data)
+# ثم ضع في Environment:
+#   WORDS_FILE=/data/words.json
 WORDS_FILE = os.getenv("WORDS_FILE", "words.json")
+SOURCE_WORDS_FILE = "words.json"  # نسخة أولية من الريبو (تُنسخ عند أول تشغيل لو الملف الدائم غير موجود)
 
-def load_words():
-    if os.path.exists(WORDS_FILE):
-        try:
-            with open(WORDS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data, dict):
-                    return data
-        except Exception:
-            pass
-    return {}
+def _ensure_parent_dir(path_str: str):
+    p = Path(path_str).expanduser()
+    if p.parent and not p.parent.exists():
+        p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+def _bootstrap_words_if_needed():
+    """إنشاء النسخة الأولى على القرص الدائم إن لم تكن موجودة."""
+    target = Path(WORDS_FILE)
+    if not target.exists() and Path(SOURCE_WORDS_FILE).exists():
+        _ensure_parent_dir(WORDS_FILE)
+        shutil.copy2(SOURCE_WORDS_FILE, WORDS_FILE)
+
+def load_words() -> dict:
+    _bootstrap_words_if_needed()
+    try:
+        with open(WORDS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
 def save_words(data: dict):
-    # يحفظ مع تنسيق جميل ويدعم العربية
-    with open(WORDS_FILE, "w", encoding="utf-8") as f:
+    _ensure_parent_dir(WORDS_FILE)
+    tmp_path = f"{WORDS_FILE}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+    Path(tmp_path).replace(WORDS_FILE)
 
 # =============================
 # مسارات عامة
@@ -90,6 +115,7 @@ ADMIN_TEMPLATE = """
     .box { border: 1px solid #ddd; border-radius: 12px; padding: 16px; margin-bottom: 16px; }
     code { background:#f5f5f5; padding:2px 6px; border-radius:6px; }
     .muted { color:#666; }
+    button { padding:8px 14px; cursor:pointer; }
   </style>
 </head>
 <body>
@@ -144,13 +170,19 @@ ADMIN_TEMPLATE = """
     </form>
   </div>
 
+  <div class="box">
+    <h3>ملفات البيانات</h3>
+    <p>
+      <a href="{{ url_for('download_words') }}">⤓ تحميل نسخة من words.json</a>
+    </p>
+  </div>
+
   <form method="post" action="{{ url_for('admin_logout') }}">
     <button type="submit">تسجيل الخروج</button>
   </form>
 </body>
 </html>
 """
-
 
 LOGIN_TEMPLATE = """
 <!doctype html>
@@ -179,6 +211,9 @@ LOGIN_TEMPLATE = """
 </html>
 """
 
+# -----------------------------
+# دوال/مسارات الإدارة
+# -----------------------------
 @app.route("/admin", methods=["GET"])
 def admin_home():
     if not session.get("admin_ok"):
@@ -197,6 +232,12 @@ def admin_login():
         session["admin_ok"] = True
         return redirect(url_for("admin_home"))
     return render_template_string(LOGIN_TEMPLATE, error="كلمة المرور غير صحيحة"), 403
+
+@app.post("/admin/logout")
+def admin_logout():
+    session.pop("admin_ok", None)
+    return redirect(url_for("admin_login"))
+
 @app.post("/admin/add")
 def admin_add():
     if not session.get("admin_ok"):
@@ -221,10 +262,19 @@ def admin_delete():
         save_words(words)
     return redirect(url_for("admin_home"))
 
-@app.post("/admin/logout")
-def admin_logout():
-    session.pop("admin_ok", None)
-    return redirect(url_for("admin_login"))
+@app.get("/admin/download-words")
+def download_words():
+    if not session.get("admin_ok"):
+        return redirect(url_for("admin_login"))
+    p = Path(WORDS_FILE)
+    if not p.exists():
+        return "الملف غير موجود على السيرفر.", 404
+    return send_file(
+        str(p),
+        as_attachment=True,
+        download_name="words.json",
+        mimetype="application/json; charset=utf-8"
+    )
 
 # =============================
 # معالجات LINE
@@ -250,7 +300,7 @@ def on_text(event: MessageEvent):
     # ردود تلقائية من words.json عبر helper
     reply = get_auto_reply(txt)
     if not reply:
-        return  # لا رد إذا ما في تطابق
+        return  # لا رد إذا لا يوجد تطابق
 
     with ApiClient(configuration) as client:
         MessagingApi(client).reply_message_with_http_info(
