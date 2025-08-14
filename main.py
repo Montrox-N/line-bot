@@ -216,6 +216,7 @@ def callback():
     except InvalidSignatureError:
         abort(400)
     return "OK"
+echo # full-word match + arabic normalize>> main.py
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
